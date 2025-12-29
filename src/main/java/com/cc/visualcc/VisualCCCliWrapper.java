@@ -35,6 +35,17 @@ public class VisualCCCliWrapper {
     private Thread errorThread;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
+    // Approval system states
+    private static final int STATE_RUNNING = 0;
+    private static final int STATE_WAITING_APPROVAL = 1;
+    private volatile int approvalState = STATE_RUNNING;
+    private final Object approvalLock = new Object();
+
+    // Process I/O
+    private OutputStream stdinStream;  // Keep open for approvals
+    private String pendingToolUseId = null;  // Tool waiting for approval
+    private JsonObject pendingToolInput = null;  // Tool input waiting for approval
+
     // Plan mode setting
     private boolean planMode = false;
 
@@ -222,9 +233,10 @@ public class VisualCCCliWrapper {
                 cmd.add("--output-format");
                 cmd.add("stream-json");
 
-                // Add permission mode (plan or default)
+                // Permission mode: bypassPermissions (auto-approve all operations)
+                // Valid modes: acceptEdits, bypassPermissions, default, delegate, dontAsk, plan
                 cmd.add("--permission-mode");
-                cmd.add(planMode ? "plan" : "default");
+                cmd.add("bypassPermissions");
 
                 // Allow multiple turns for interactive conversations
                 cmd.add("--max-turns");
@@ -255,6 +267,7 @@ public class VisualCCCliWrapper {
                     (jsonInput.length() > 200 ? jsonInput.substring(0, 200) + "..." : jsonInput));
 
                 // Write JSON to stdin and close it (signals EOF)
+                // CLI needs EOF to know input is complete and start processing
                 try (OutputStream stdin = cliProcess.getOutputStream()) {
                     stdin.write(jsonInput.getBytes(StandardCharsets.UTF_8));
                     stdin.write('\n');
