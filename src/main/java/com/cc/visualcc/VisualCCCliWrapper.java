@@ -254,20 +254,10 @@ public class VisualCCCliWrapper {
                 // Start output reading
                 startOutputReaders();
 
-                // Wait for process to complete (with timeout)
+                // Wait for process to complete (no timeout)
                 log(">>> Waiting for process to complete...");
-                boolean finished = cliProcess.waitFor(120, TimeUnit.SECONDS);
-
-                if (!finished) {
-                    log("ERROR: Process timeout after 120s, killing");
-                    cliProcess.destroyForcibly();
-                    chatPanel.addMessage("System", "Process timeout after 120s",
-                            VisualCCChatPanel.MessageType.SYSTEM);
-                    chatPanel.setStatus("Timeout", new Color(200, 100, 100));
-                } else {
-                    int exitCode = cliProcess.exitValue();
-                    log(">>> Process completed with exit code: " + exitCode);
-                }
+                int exitCode = cliProcess.waitFor();
+                log(">>> Process completed with exit code: " + exitCode);
 
                 // Wait for output threads to finish
                 log(">>> Waiting for output threads to finish...");
