@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(./gradlew.bat runIde:*)",
+      "Bash(cat:*)",
+      "Bash(./gradlew.bat clean buildPlugin:*)",
+      "Bash(tasklist:*)",
+      "Bash(./gradlew.bat buildPlugin:*)",
+      "Bash(./gradlew.bat clean:*)"
+    ]
+  }
+}

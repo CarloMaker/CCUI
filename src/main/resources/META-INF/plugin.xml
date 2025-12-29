@@ -1,0 +1,41 @@
+<!-- Plugin Configuration File. Read more: https://plugins.jetbrains.com/docs/intellij/plugin-configuration-file.html -->
+<idea-plugin>
+    <!-- Unique identifier of the plugin. It should be FQN. It cannot be changed between the plugin versions. -->
+    <id>com.cc.VisualCC</id>
+
+    <!-- Public plugin name should be written in Title Case.
+         Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-name -->
+    <name>VisualCC - Claude Code Interface</name>
+
+    <!-- A displayed Vendor name or Organization ID displayed on the Plugins Page. -->
+    <vendor email="support@yourcompany.com" url="https://www.yourcompany.com">YourCompany</vendor>
+
+    <!-- Description of the plugin displayed on the Plugin Page and IDE Plugin Manager.
+         Simple HTML elements (text formatting, paragraphs, and lists) can be added inside of <![CDATA[ ]]> tag.
+         Guidelines: https://plugins.jetbrains.com/docs/marketplace/plugin-overview-page.html#plugin-description -->
+    <description><![CDATA[
+    A beautiful Cline-inspired interface for Claude Code CLI directly in IntelliJ IDEA.<br><br>
+    <strong>Features:</strong><br>
+    • Side panel chat UI with modern gradient styling<br>
+    • Full integration with Claude Code CLI<br>
+    • Styled message bubbles for User/Claude/Tool outputs<br>
+    • Memory-aware conversation management<br>
+    • File operations and terminal commands support<br>
+    • Questions and approvals handled in-chat<br><br>
+    <em>Replace your terminal with a beautiful AI chat interface!</em>
+  ]]></description>
+
+    <!-- Product and plugin compatibility requirements.
+         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-compatibility.html -->
+    <depends>com.intellij.modules.platform</depends>
+
+    <!-- Extension points defined by the plugin.
+         Read more: https://plugins.jetbrains.com/docs/intellij/plugin-extension-points.html -->
+    <extensions defaultExtensionNs="com.intellij">
+        <applicationService serviceImplementation="com.cc.visualcc.VisualCCConfig"/>
+        <applicationConfigurable instance="com.cc.visualcc.VisualCCSettingsConfigurable"
+                                 displayName="VisualCC" parentId="tools"/>
+        <toolWindow id="VisualCC" factoryClass="com.cc.visualcc.VisualCCToolWindowFactory"
+                    anchor="right" icon="/META-INF/pluginIcon.svg"/>
+    </extensions>
+</idea-plugin>
