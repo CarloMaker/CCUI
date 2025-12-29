@@ -11,6 +11,8 @@ import com.google.gson.JsonParser;
 import java.io.*;
 import java.awt.Color;
 import java.nio.charset.StandardCharsets;
+import java.time.LocalDateTime;
+import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.TimeUnit;
@@ -21,6 +23,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * Uses JSON stdin input with stream-json output format (like Kilo Code).
  */
 public class VisualCCCliWrapper {
+
+    // File logging
+    private FileWriter logFileWriter;
+    private static final DateTimeFormatter LOG_FORMAT = DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss.SSS");
 
     private final Project project;
     private final VisualCCChatPanel chatPanel;
@@ -39,14 +45,57 @@ public class VisualCCCliWrapper {
     public VisualCCCliWrapper(Project project, VisualCCChatPanel chatPanel) {
         this.project = project;
         this.chatPanel = chatPanel;
+        initFileLogger();
+    }
+
+    /**
+     * Initialize file logger
+     */
+    private void initFileLogger() {
+        try {
+            String logDir = System.getProperty("user.home") + File.separator + ".visualcc";
+            File dir = new File(logDir);
+            if (!dir.exists()) {
+                dir.mkdirs();
+            }
+            File logFile = new File(logDir + File.separator + "visualcc.log");
+            logFileWriter = new FileWriter(logFile, false);  // Overwrite each session
+            log("==========================================");
+            log("VisualCC Logger Initialized");
+            log("Log file: " + logFile.getAbsolutePath());
+            log("==========================================");
+        } catch (IOException e) {
+            System.err.println("[VisualCC] Failed to initialize file logger: " + e.getMessage());
+        }
+    }
+
+    /**
+     * Log message to both console and file
+     */
+    private void log(String message) {
+        String timestamp = LocalDateTime.now().format(LOG_FORMAT);
+        String logLine = "[" + timestamp + "] " + message;
+
+        // Always print to console
+        System.out.println(logLine);
+
+        // Also write to file if available
+        if (logFileWriter != null) {
+            try {
+                logFileWriter.write(logLine + "\n");
+                logFileWriter.flush();
+            } catch (IOException e) {
+                System.err.println("[VisualCC] Failed to write to log file: " + e.getMessage());
+            }
+        }
     }
 
     public void start() {
-        System.out.println("[VisualCC CLI Wrapper] start() called");
+        log(">>> start() called");
         String claudeCommand = findClaudeCommand();
-        System.out.println("[VisualCC CLI Wrapper] Claude command: " + claudeCommand);
+        log("Claude command: " + claudeCommand);
         if (claudeCommand == null) {
-            System.out.println("[VisualCC CLI Wrapper] Claude command not found!");
+            log("ERROR: Claude command not found!");
             chatPanel.addMessage("System",
                     "Claude Code CLI not found!\n\n" +
                     "Please install Claude Code CLI from: https://claude.ai/code\n\n" +
@@ -58,6 +107,7 @@ public class VisualCCCliWrapper {
         running.set(true);
         chatPanel.addMessage("System", "VisualCC ready. Connected to: " + claudeCommand,
                 VisualCCChatPanel.MessageType.SYSTEM);
+        log("VisualCC started successfully");
     }
 
     private String findClaudeCommand() {
@@ -100,14 +150,17 @@ public class VisualCCCliWrapper {
     }
 
     public void sendInput(String userMessage) {
-        System.out.println("[VisualCC CLI Wrapper] sendInput() called with: " + userMessage);
+        log(">>> sendInput() called with: '" + userMessage + "'");
+        log(">>> waitingForAnswer = " + waitingForAnswer);
 
         // Kline approach: if waiting for answer, accumulate the response
         if (waitingForAnswer) {
-            System.out.println("[VisualCC CLI Wrapper] Accumulating answer to question");
+            log(">>> MODE: Accumulating ANSWER to question");
             accumulatedUserMessage.append("\n\n[My answer: ").append(userMessage).append("]");
+            log(">>> Accumulated message: " + accumulatedUserMessage.toString());
             waitingForAnswer = false;
             chatPanel.setWaitingForAnswer(false);
+            log(">>> Sending accumulated message (original + answer)");
             // Now send the accumulated message (original + answer)
             sendInputInternal(accumulatedUserMessage.toString());
             accumulatedUserMessage.setLength(0); // Clear for next time
@@ -115,23 +168,28 @@ public class VisualCCCliWrapper {
         }
 
         // Normal message - start fresh
+        log(">>> MODE: Normal message");
         sendInputInternal(userMessage);
     }
 
     private void sendInputInternal(String userMessage) {
-        System.out.println("[VisualCC CLI Wrapper] sendInputInternal() called with: " + userMessage);
+        log(">>> sendInputInternal() called");
+        log(">>> Message length: " + userMessage.length());
 
         if (!running.get()) {
-            System.out.println("[VisualCC CLI Wrapper] Wrapper not running!");
+            log("ERROR: Wrapper not running!");
             return;
         }
 
         String claudeCommand = findClaudeCommand();
         if (claudeCommand == null) {
+            log("ERROR: Claude command not found!");
             chatPanel.addMessage("System", "Claude command not found!",
                     VisualCCChatPanel.MessageType.SYSTEM);
             return;
         }
+
+        log(">>> Starting CLI process");
 
         // Set working state
         chatPanel.setWorkingState(true);
@@ -168,9 +226,11 @@ public class VisualCCCliWrapper {
                 // Set environment
                 pb.redirectErrorStream(false);
 
-                System.out.println("[VisualCC CLI Wrapper] Executing: " + pb.command());
+                log(">>> Executing CLI: " + pb.command());
+                log(">>> Working directory: " + project.getBasePath());
 
                 cliProcess = pb.start();
+                log(">>> Process started, PID: " + cliProcess.pid());
 
                 // Prepare JSON input for stdin
                 JsonObject message = new JsonObject();
@@ -181,7 +241,7 @@ public class VisualCCCliWrapper {
                 messages.add(message);
 
                 String jsonInput = gson.toJson(messages);
-                System.out.println("[VisualCC CLI Wrapper] Sending JSON to stdin: " + jsonInput);
+                log(">>> Sending JSON to stdin: " + jsonInput);
 
                 // Write JSON to stdin and close it (signals EOF)
                 try (OutputStream stdin = cliProcess.getOutputStream()) {
@@ -189,34 +249,38 @@ public class VisualCCCliWrapper {
                     stdin.write('\n');
                     stdin.flush();
                 }
+                log(">>> JSON sent to stdin, stream closed");
 
                 // Start output reading
                 startOutputReaders();
 
                 // Wait for process to complete (with timeout)
+                log(">>> Waiting for process to complete...");
                 boolean finished = cliProcess.waitFor(120, TimeUnit.SECONDS);
 
                 if (!finished) {
-                    System.out.println("[VisualCC CLI Wrapper] Process timeout, killing");
+                    log("ERROR: Process timeout after 120s, killing");
                     cliProcess.destroyForcibly();
                     chatPanel.addMessage("System", "Process timeout after 120s",
                             VisualCCChatPanel.MessageType.SYSTEM);
                     chatPanel.setStatus("Timeout", new Color(200, 100, 100));
                 } else {
                     int exitCode = cliProcess.exitValue();
-                    System.out.println("[VisualCC CLI Wrapper] Process exit code: " + exitCode);
+                    log(">>> Process completed with exit code: " + exitCode);
                 }
 
                 // Wait for output threads to finish
+                log(">>> Waiting for output threads to finish...");
                 if (outputThread != null) {
                     outputThread.join(2000);
                 }
                 if (errorThread != null) {
                     errorThread.join(2000);
                 }
+                log(">>> All threads finished");
 
             } catch (Exception e) {
-                System.out.println("[VisualCC CLI Wrapper] Error: " + e.getMessage());
+                log("ERROR: " + e.getMessage());
                 e.printStackTrace();
                 chatPanel.addMessage("System", "Error: " + e.getMessage(),
                         VisualCCChatPanel.MessageType.SYSTEM);
@@ -229,19 +293,22 @@ public class VisualCCCliWrapper {
     }
 
     private void startOutputReaders() {
-        System.out.println("[VisualCC CLI Wrapper] Starting output readers");
+        log(">>> Starting output readers");
 
         outputThread = new Thread(() -> {
             try (BufferedReader reader = new BufferedReader(
                     new InputStreamReader(cliProcess.getInputStream(), StandardCharsets.UTF_8))) {
 
                 String line;
+                int lineCount = 0;
                 while ((line = reader.readLine()) != null) {
-                    System.out.println("[VisualCC CLI Wrapper] STDOUT: " + line);
+                    lineCount++;
+                    log("STDOUT [" + lineCount + "]: " + (line.length() > 200 ? line.substring(0, 200) + "..." : line));
                     processJsonLine(line);
                 }
+                log("STDOUT: End of stream (total lines: " + lineCount + ")");
             } catch (IOException e) {
-                System.out.println("[VisualCC CLI Wrapper] STDOUT read error: " + e.getMessage());
+                log("ERROR: STDOUT read error: " + e.getMessage());
             }
         }, "VisualCC-stdout");
 
@@ -251,12 +318,12 @@ public class VisualCCCliWrapper {
 
                 String line;
                 while ((line = reader.readLine()) != null) {
-                    System.out.println("[VisualCC CLI Wrapper] STDERR: " + line);
+                    log("STDERR: " + line);
                     chatPanel.addMessage("System", "[Error] " + line,
                             VisualCCChatPanel.MessageType.SYSTEM);
                 }
             } catch (IOException e) {
-                System.out.println("[VisualCC CLI Wrapper] STDERR read error: " + e.getMessage());
+                log("ERROR: STDERR read error: " + e.getMessage());
             }
         }, "VisualCC-stderr");
 
@@ -267,7 +334,7 @@ public class VisualCCCliWrapper {
     private void processJsonLine(String line) {
         if (line.trim().isEmpty()) return;
 
-        System.out.println("[VisualCC CLI Wrapper] Processing JSON line: " + line);
+        log(">>> processJsonLine(): " + (line.length() > 150 ? line.substring(0, 150) + "..." : line));
 
         try {
             JsonElement element = JsonParser.parseString(line);
@@ -276,20 +343,20 @@ public class VisualCCCliWrapper {
                 JsonObject obj = element.getAsJsonObject();
 
                 String type = obj.has("type") ? obj.get("type").getAsString() : null;
-                System.out.println("[VisualCC CLI Wrapper] JSON type: " + type);
+                log(">>> JSON type: " + type);
 
                 if ("text".equals(type)) {
                     // Direct text message
                     String text = obj.get("text").getAsString();
-                    System.out.println("[VisualCC CLI Wrapper] Text content: " + text);
+                    log(">>> Text content: " + text);
                     chatPanel.addMessage("Claude", text, VisualCCChatPanel.MessageType.CLAUDE);
                 } else if ("user".equals(type)) {
                     // User message (tool_result) - internal, don't display
                     // These are just tool results that Claude uses internally
-                    System.out.println("[VisualCC CLI Wrapper] Skipping user/tool_result message (internal)");
+                    log(">>> Skipping user/tool_result message (internal)");
                 } else if ("assistant".equals(type)) {
                     // Assistant message with nested content
-                    System.out.println("[VisualCC CLI Wrapper] Processing assistant message");
+                    log(">>> Processing assistant message");
                     if (obj.has("message")) {
                         JsonObject message = obj.getAsJsonObject("message");
 
@@ -300,8 +367,7 @@ public class VisualCCCliWrapper {
                             int outputTokens = usage.has("output_tokens") ? usage.get("output_tokens").getAsInt() : 0;
                             int cacheTokens = usage.has("cache_read_input_tokens") ? usage.get("cache_read_input_tokens").getAsInt() : 0;
 
-                            System.out.println("[VisualCC CLI Wrapper] Token usage - Input: " + inputTokens +
-                                ", Output: " + outputTokens + ", Cache: " + cacheTokens);
+                            log(">>> Token usage - Input: " + inputTokens + ", Output: " + outputTokens + ", Cache: " + cacheTokens);
                             chatPanel.updateTokenInfo(inputTokens, outputTokens, cacheTokens);
                         }
 
@@ -331,11 +397,13 @@ public class VisualCCCliWrapper {
                                             // Handle tool_use (Read, Write, Bash, AskUserQuestion, etc.)
                                             String toolName = contentObj.has("name") ?
                                                 contentObj.get("name").getAsString() : "";
-                                            System.out.println("[VisualCC CLI Wrapper] Tool use: " + toolName);
+                                            log(">>> Tool use detected: " + toolName);
 
                                             // Handle AskUserQuestion tool
                                             if ("AskUserQuestion".equals(toolName)) {
-                                                System.out.println("[VisualCC CLI Wrapper] AskUserQuestion detected!");
+                                                log("==========================================");
+                                                log("!!! AskUserQuestion DETECTED !!!");
+                                                log("==========================================");
                                                 handleAskUserQuestion(contentObj);
                                                 return;  // Exit processing, wait for user response
                                             }
@@ -351,23 +419,23 @@ public class VisualCCCliWrapper {
 
                             // Add accumulated text as single message
                             if (fullText.length() > 0) {
-                                System.out.println("[VisualCC CLI Wrapper] Accumulated text: " + fullText);
+                                log(">>> Accumulated text: " + fullText);
                                 chatPanel.addMessage("Claude", fullText.toString(), VisualCCChatPanel.MessageType.CLAUDE);
                             }
                         }
                     }
                 } else if ("system".equals(type)) {
                     // System message - log for debugging
-                    System.out.println("[VisualCC CLI Wrapper] System message: " + line);
+                    log(">>> System message: " + line);
                 } else if ("error".equals(type)) {
                     // Error message
-                    System.out.println("[VisualCC CLI Wrapper] Error message: " + line);
+                    log(">>> Error message: " + line);
                     String errorMsg = obj.has("error") ? obj.get("error").getAsString() : line;
                     chatPanel.addMessage("System", "Error: " + errorMsg, VisualCCChatPanel.MessageType.SYSTEM);
                     chatPanel.setStatus("Error", new Color(200, 80, 80));
                 } else if ("result".equals(type)) {
                     // Result/final message with cost and duration info
-                    System.out.println("[VisualCC CLI Wrapper] Result: " + line);
+                    log(">>> Result: " + line);
 
                     // Extract cost and duration info (from Kilo Code types)
                     double totalCost = obj.has("total_cost_usd") ? obj.get("total_cost_usd").getAsDouble() : 0.0;
@@ -376,23 +444,26 @@ public class VisualCCCliWrapper {
                     int numTurns = obj.has("num_turns") ? obj.get("num_turns").getAsInt() : 0;
                     String resultMsg = obj.has("result") ? obj.get("result").getAsString() : "";
 
-                    System.out.println("[VisualCC CLI Wrapper] Cost: $" + String.format("%.4f", totalCost) +
+                    log(">>> Cost: $" + String.format("%.4f", totalCost) +
                         ", Duration: " + durationMs + "ms, API: " + durationApiMs + "ms, Turns: " + numTurns);
 
                     // Show completion message with cost info
                     chatPanel.setStatus("Done ($" + String.format("%.4f", totalCost) + ")", new Color(80, 140, 90));
                 } else {
-                    System.out.println("[VisualCC CLI Wrapper] Unknown type: " + type);
+                    log(">>> Unknown type: " + type);
                 }
             }
         } catch (Exception e) {
             // Silently ignore parsing errors - JSON is parsed correctly above
-            System.out.println("[VisualCC CLI Wrapper] JSON parse error: " + e.getMessage());
+            log(">>> JSON parse error: " + e.getMessage());
+            e.printStackTrace();
         }
     }
 
     public void dispose() {
-        System.out.println("[VisualCC CLI Wrapper] dispose() called");
+        log("==========================================");
+        log("!!! dispose() called !!!");
+        log("==========================================");
         running.set(false);
 
         if (cliProcess != null) {
@@ -405,6 +476,16 @@ public class VisualCCCliWrapper {
 
         if (errorThread != null) {
             errorThread.interrupt();
+        }
+
+        // Close log file
+        if (logFileWriter != null) {
+            try {
+                log("Closing log file");
+                logFileWriter.close();
+            } catch (IOException e) {
+                System.err.println("Failed to close log file: " + e.getMessage());
+            }
         }
     }
 
@@ -425,10 +506,16 @@ public class VisualCCCliWrapper {
      * Called when we detect a question in the agent's response
      */
     public void startWaitingForAnswer(String currentMessage) {
-        System.out.println("[VisualCC CLI Wrapper] Starting to wait for user answer");
+        log("==========================================");
+        log("!!! startWaitingForAnswer() called !!!");
+        log("==========================================");
+        log(">>> waitingForAnswer = " + waitingForAnswer);
+        log(">>> Message to accumulate: " + currentMessage);
         waitingForAnswer = true;
         accumulatedUserMessage.append(currentMessage);
+        log(">>> accumulatedUserMessage is now: " + accumulatedUserMessage.toString());
         chatPanel.setWaitingForAnswer(true);
+        log(">>> UI updated to waiting state");
     }
 
     /**
@@ -436,11 +523,19 @@ public class VisualCCCliWrapper {
      * Extracts questions and triggers waiting state for user response
      */
     private void handleAskUserQuestion(JsonObject toolUseObj) {
+        log("==========================================");
+        log("!!! handleAskUserQuestion() START !!!");
+        log("==========================================");
+        log(">>> toolUseObj: " + toolUseObj);
+
         try {
             // Extract the input/payload from the tool_use
             JsonObject input = null;
             if (toolUseObj.has("input")) {
                 input = toolUseObj.getAsJsonObject("input");
+                log(">>> input found: " + input);
+            } else {
+                log("WARNING: No 'input' field in toolUseObj!");
             }
 
             if (input != null) {
@@ -450,7 +545,12 @@ public class VisualCCCliWrapper {
                     JsonElement questionsEl = input.get("questions");
                     if (questionsEl.isJsonArray()) {
                         questions = questionsEl.getAsJsonArray();
+                        log(">>> questions array found with " + questions.size() + " elements");
+                    } else {
+                        log("WARNING: 'questions' field is not an array: " + questionsEl);
                     }
+                } else {
+                    log("WARNING: No 'questions' field in input!");
                 }
 
                 StringBuilder questionsText = new StringBuilder();
@@ -461,32 +561,43 @@ public class VisualCCCliWrapper {
                         questionsText.append(i + 1).append(". ");
                         questionsText.append(questions.get(i).getAsString());
                         questionsText.append("\n");
+                        log(">>> Question " + (i+1) + ": " + questions.get(i).getAsString());
                     }
                 } else {
                     // Fallback: if no questions array, look for a single question text
                     if (input.has("question")) {
                         questionsText.append(input.get("question").getAsString());
+                        log(">>> Single question found: " + input.get("question").getAsString());
                     } else {
                         questionsText.append("(Nessuna domanda specificata)");
+                        log("WARNING: No questions found in tool_use!");
                     }
                 }
 
                 // Display the questions
                 String qText = questionsText.toString();
-                System.out.println("[VisualCC CLI Wrapper] Questions: " + qText);
+                log(">>> Displaying questions to user: " + qText);
                 chatPanel.addMessage("Claude", qText, VisualCCChatPanel.MessageType.QUESTION);
 
                 // Store the current context and start waiting for answer
                 // We'll accumulate the user's response when it comes
+                log(">>> Calling startWaitingForAnswer()");
                 startWaitingForAnswer("[User answered Claude's questions]");
 
                 // Set working state to false since we're waiting
                 chatPanel.setWorkingState(false);
+                log(">>> Working state set to false");
+            } else {
+                log("ERROR: input is null, cannot process AskUserQuestion");
             }
 
         } catch (Exception e) {
-            System.out.println("[VisualCC CLI Wrapper] Error handling AskUserQuestion: " + e.getMessage());
+            log("ERROR in handleAskUserQuestion: " + e.getMessage());
             e.printStackTrace();
         }
+
+        log("==========================================");
+        log("!!! handleAskUserQuestion() END !!!");
+        log("==========================================");
     }
 }
