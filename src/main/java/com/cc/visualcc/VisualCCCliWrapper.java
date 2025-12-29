@@ -558,10 +558,29 @@ public class VisualCCCliWrapper {
 
                 if (questions != null && questions.size() > 0) {
                     for (int i = 0; i < questions.size(); i++) {
-                        questionsText.append(i + 1).append(". ");
-                        questionsText.append(questions.get(i).getAsString());
-                        questionsText.append("\n");
-                        log(">>> Question " + (i+1) + ": " + questions.get(i).getAsString());
+                        JsonElement questionEl = questions.get(i);
+                        // Each question is an object with a "question" field
+                        if (questionEl.isJsonObject()) {
+                            JsonObject questionObj = questionEl.getAsJsonObject();
+                            String questionText = questionObj.has("question") ?
+                                questionObj.get("question").getAsString() : "(No question text)";
+
+                            questionsText.append(i + 1).append(". ");
+                            questionsText.append(questionText);
+                            questionsText.append("\n");
+                            log(">>> Question " + (i+1) + ": " + questionText);
+
+                            // Also log options if available
+                            if (questionObj.has("options")) {
+                                JsonArray options = questionObj.get("options").getAsJsonArray();
+                                log(">>>    Options available: " + options.size());
+                            }
+                        } else {
+                            // Fallback if it's just a string
+                            questionsText.append(i + 1).append(". ");
+                            questionsText.append(questionEl.getAsString());
+                            questionsText.append("\n");
+                        }
                     }
                 } else {
                     // Fallback: if no questions array, look for a single question text
@@ -587,6 +606,16 @@ public class VisualCCCliWrapper {
                 // Set working state to false since we're waiting
                 chatPanel.setWorkingState(false);
                 log(">>> Working state set to false");
+
+                // IMPORTANT: Kill the CLI process now because:
+                // 1. stdin is already closed
+                // 2. We can't send a response while process is running
+                // 3. User will answer, then we'll start a new CLI session
+                log(">>> Killing CLI process - waiting for user to answer questions");
+                if (cliProcess != null && cliProcess.isAlive()) {
+                    cliProcess.destroyForcibly();
+                    log(">>> CLI process killed");
+                }
             } else {
                 log("ERROR: input is null, cannot process AskUserQuestion");
             }
