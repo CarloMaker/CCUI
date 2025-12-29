@@ -35,6 +35,12 @@ public class VisualCCCliWrapper {
     private Thread errorThread;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
+    // Plan mode setting
+    private boolean planMode = false;
+
+    // Conversation history to maintain context across CLI sessions
+    private JsonArray conversationHistory = new JsonArray();
+
     // User question response handling - following Kline approach
     private boolean waitingForAnswer = false;
     private StringBuilder accumulatedUserMessage = new StringBuilder();  // Accumulate questions + answers
@@ -216,6 +222,10 @@ public class VisualCCCliWrapper {
                 cmd.add("--output-format");
                 cmd.add("stream-json");
 
+                // Add permission mode (plan or default)
+                cmd.add("--permission-mode");
+                cmd.add(planMode ? "plan" : "default");
+
                 // Allow multiple turns for interactive conversations
                 cmd.add("--max-turns");
                 cmd.add("10");
@@ -232,16 +242,17 @@ public class VisualCCCliWrapper {
                 cliProcess = pb.start();
                 log(">>> Process started, PID: " + cliProcess.pid());
 
-                // Prepare JSON input for stdin
-                JsonObject message = new JsonObject();
-                message.addProperty("role", "user");
-                message.addProperty("content", userMessage);
+                // Add user message to conversation history
+                JsonObject userMsg = new JsonObject();
+                userMsg.addProperty("role", "user");
+                userMsg.addProperty("content", userMessage);
+                conversationHistory.add(userMsg);
+                log(">>> Added user message to history. History size: " + conversationHistory.size());
 
-                JsonArray messages = new JsonArray();
-                messages.add(message);
-
-                String jsonInput = gson.toJson(messages);
-                log(">>> Sending JSON to stdin: " + jsonInput);
+                // Send entire conversation history to CLI (not just current message)
+                String jsonInput = gson.toJson(conversationHistory);
+                log(">>> Sending JSON to stdin (" + jsonInput.length() + " chars): " +
+                    (jsonInput.length() > 200 ? jsonInput.substring(0, 200) + "..." : jsonInput));
 
                 // Write JSON to stdin and close it (signals EOF)
                 try (OutputStream stdin = cliProcess.getOutputStream()) {
@@ -323,6 +334,13 @@ public class VisualCCCliWrapper {
 
     private void processJsonLine(String line) {
         if (line.trim().isEmpty()) return;
+
+        // STOP processing if we're waiting for user answer
+        // This prevents processing after we've killed the CLI process
+        if (waitingForAnswer) {
+            log(">>> NOT processing line - waiting for user to answer questions");
+            return;
+        }
 
         log(">>> processJsonLine(): " + (line.length() > 150 ? line.substring(0, 150) + "..." : line));
 
@@ -411,6 +429,13 @@ public class VisualCCCliWrapper {
                             if (fullText.length() > 0) {
                                 log(">>> Accumulated text: " + fullText);
                                 chatPanel.addMessage("Claude", fullText.toString(), VisualCCChatPanel.MessageType.CLAUDE);
+
+                                // Add assistant response to conversation history
+                                JsonObject assistantMsg = new JsonObject();
+                                assistantMsg.addProperty("role", "assistant");
+                                assistantMsg.addProperty("content", fullText.toString());
+                                conversationHistory.add(assistantMsg);
+                                log(">>> Added assistant response to history. History size: " + conversationHistory.size());
                             }
                         }
                     }
@@ -489,6 +514,34 @@ public class VisualCCCliWrapper {
      */
     public boolean isWaitingForResponse() {
         return waitingForAnswer;
+    }
+
+    /**
+     * Set plan mode on/off
+     * @param enabled true for plan mode, false for default mode
+     */
+    public void setPlanMode(boolean enabled) {
+        log(">>> Plan mode set to: " + enabled);
+        this.planMode = enabled;
+    }
+
+    /**
+     * Clear conversation history for new conversation
+     */
+    public void clearHistory() {
+        log("==========================================");
+        log(">>> Clearing conversation history");
+        log(">>> Previous history size: " + conversationHistory.size());
+        conversationHistory = new JsonArray();
+        log(">>> History cleared. New size: " + conversationHistory.size());
+        log("==========================================");
+    }
+
+    /**
+     * Get current plan mode setting
+     */
+    public boolean isPlanMode() {
+        return planMode;
     }
 
     /**

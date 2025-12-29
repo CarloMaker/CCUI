@@ -44,6 +44,7 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
     private JLabel statusLabel;
     private JLabel tokenLabel;
     private JLabel workingLabel;  // Shows "Claude is working..." with animated indicator
+    private JCheckBox planModeCheckBox;  // Toggle for plan mode
     private VisualCCCliWrapper cliWrapper;
     private String placeholderText = "Type a message... (Ctrl+Enter to send)";
     private boolean isWorking = false;
@@ -265,10 +266,30 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
         hintLabel.setFont(new Font("Segoe UI", Font.PLAIN, 11));
         hintLabel.setForeground(TEXT_MUTED);
 
-        // Center: Working indicator
+        // Center: Working indicator and Plan Mode toggle
+        JPanel centerPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 0));
+        centerPanel.setOpaque(false);
+
         workingLabel = new JLabel("");
         workingLabel.setFont(new Font("Segoe UI", Font.PLAIN, 11));
         workingLabel.setForeground(new Color(100, 160, 200));  // Light blue for working state
+
+        // Plan Mode checkbox
+        planModeCheckBox = new JCheckBox("Plan Mode");
+        planModeCheckBox.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        planModeCheckBox.setForeground(new Color(120, 140, 170));  // Muted blue-gray
+        planModeCheckBox.setSelected(false);
+        planModeCheckBox.setOpaque(false);
+        planModeCheckBox.setToolTipText("Enable Plan Mode - Claude will plan before implementing");
+        planModeCheckBox.addActionListener(e -> {
+            boolean selected = planModeCheckBox.isSelected();
+            if (cliWrapper != null) {
+                cliWrapper.setPlanMode(selected);
+            }
+        });
+
+        centerPanel.add(workingLabel);
+        centerPanel.add(planModeCheckBox);
 
         // Right: Status and tokens
         JPanel rightStatusPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
@@ -286,7 +307,7 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
         rightStatusPanel.add(tokenLabel);
 
         statusBar.add(hintLabel, BorderLayout.WEST);
-        statusBar.add(workingLabel, BorderLayout.CENTER);
+        statusBar.add(centerPanel, BorderLayout.CENTER);
         statusBar.add(rightStatusPanel, BorderLayout.EAST);
 
         container.add(inputWrapper, BorderLayout.CENTER);
