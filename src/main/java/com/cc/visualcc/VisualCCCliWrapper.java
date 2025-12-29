@@ -605,6 +605,16 @@ public class VisualCCCliWrapper {
                 if (cliProcess != null && cliProcess.isAlive()) {
                     cliProcess.destroyForcibly();
                     log(">>> CLI process killed");
+
+                    // Also interrupt the output threads so they stop waiting for input
+                    if (outputThread != null && outputThread.isAlive()) {
+                        outputThread.interrupt();
+                        log(">>> Output thread interrupted");
+                    }
+                    if (errorThread != null && errorThread.isAlive()) {
+                        errorThread.interrupt();
+                        log(">>> Error thread interrupted");
+                    }
                 }
             } else {
                 log("ERROR: input is null, cannot process AskUserQuestion");
