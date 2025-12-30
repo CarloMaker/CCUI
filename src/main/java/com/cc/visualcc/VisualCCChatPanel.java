@@ -45,12 +45,16 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
     private JLabel tokenLabel;
     private JLabel workingLabel;  // Shows "Claude is working..." with animated indicator
     private JCheckBox planModeCheckBox;  // Toggle for plan mode
+    private JCheckBox autoApprovalCheckBox;  // Toggle for auto-approval
     private VisualCCCliWrapper cliWrapper;
     private String placeholderText = "Type a message... (Ctrl+Enter to send)";
     private boolean isWorking = false;
     private long workingStartTime = 0;
     private Timer workingTimer;
     private String currentTool = null;  // Current tool being used (e.g., "Read", "Write")
+
+    // Conversation history - persists across CLI wrapper recreation (e.g., after STOP)
+    private final com.google.gson.JsonArray conversationHistory = new com.google.gson.JsonArray();
 
     public VisualCCChatPanel(Project project) {
         this.project = project;
@@ -103,10 +107,14 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
         titleLabel.setForeground(TEXT_PRIMARY);
         titlePanel.add(titleLabel);
 
-        // Right: Toolbar buttons
-        JPanel toolbarPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 4, 0));
+        // Right: Toolbar buttons (checkboxes moved to input panel)
+        JPanel toolbarPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
         toolbarPanel.setOpaque(false);
 
+        // Initialize checkboxes (will be added to input panel)
+        createToggleCheckboxes();
+
+        // Toolbar buttons
         JButton newChatBtn = createToolbarButton(AllIcons.General.Add, "New Chat");
         JButton historyBtn = createToolbarButton(AllIcons.Actions.Find, "History");
         JButton settingsBtn = createToolbarButton(AllIcons.General.Settings, "Settings");
@@ -148,10 +156,50 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
         return btn;
     }
 
+    /**
+     * Create toggle checkboxes for Plan Mode and Auto-Approve
+     * These will be added above the input field
+     */
+    private void createToggleCheckboxes() {
+        // Plan Mode checkbox
+        planModeCheckBox = new JCheckBox("Plan Mode");
+        planModeCheckBox.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        planModeCheckBox.setForeground(new Color(120, 140, 170));  // Muted blue-gray
+        planModeCheckBox.setSelected(false);
+        planModeCheckBox.setOpaque(false);
+        planModeCheckBox.setToolTipText("Enable Plan Mode - Claude will plan before implementing");
+        planModeCheckBox.addActionListener(e -> {
+            boolean selected = planModeCheckBox.isSelected();
+            if (cliWrapper != null) {
+                cliWrapper.setPlanMode(selected);
+            }
+        });
+
+        // Auto-Approve checkbox
+        autoApprovalCheckBox = new JCheckBox("Auto-Approve");
+        autoApprovalCheckBox.setFont(new Font("Segoe UI", Font.PLAIN, 11));
+        autoApprovalCheckBox.setForeground(new Color(100, 160, 100));  // Green tint
+        autoApprovalCheckBox.setSelected(true);  // Default to enabled
+        autoApprovalCheckBox.setOpaque(false);
+        autoApprovalCheckBox.setToolTipText("Auto-approve file operations (Write, Edit, etc.)");
+        autoApprovalCheckBox.addActionListener(e -> {
+            boolean selected = autoApprovalCheckBox.isSelected();
+            if (cliWrapper != null) {
+                cliWrapper.setAutoApproval(selected);
+            }
+        });
+    }
+
     private JPanel createInputPanel() {
         JPanel container = new JPanel(new BorderLayout());
         container.setBackground(BG_PRIMARY);
         container.setBorder(JBUI.Borders.empty(12));
+
+        // ===== TOP PANEL: Checkboxes =====
+        JPanel topPanel = new JPanel(new FlowLayout(FlowLayout.LEFT, 16, 4));
+        topPanel.setOpaque(false);
+        topPanel.add(planModeCheckBox);
+        topPanel.add(autoApprovalCheckBox);
 
         // Input wrapper with rounded border
         JPanel inputWrapper = new JPanel(new BorderLayout(8, 0)) {
@@ -213,14 +261,20 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
             }
         });
 
-        // Send button (circular, icon-style)
+        // Send button (circular, icon-style) - changes to STOP when working
         sendButton = new JButton(AllIcons.Actions.Execute) {
             @Override
             protected void paintComponent(Graphics g) {
                 Graphics2D g2 = (Graphics2D) g.create();
                 g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
 
-                Color bgColor = getModel().isRollover() ? ACCENT_HOVER : ACCENT_COLOR;
+                // Red color for stop button when working
+                Color bgColor;
+                if (isWorking) {
+                    bgColor = getModel().isRollover() ? new Color(200, 100, 100) : new Color(180, 80, 80);
+                } else {
+                    bgColor = getModel().isRollover() ? ACCENT_HOVER : ACCENT_COLOR;
+                }
                 g2.setColor(bgColor);
                 g2.fillOval(0, 0, getWidth() - 1, getHeight() - 1);
 
@@ -238,7 +292,12 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
 
         sendButton.addActionListener(e -> {
             System.out.println("[VisualCC] Send button clicked!");
-            sendMessage();
+            if (isWorking) {
+                // Stop execution
+                stopExecution();
+            } else {
+                sendMessage();
+            }
         });
 
         JScrollPane inputScroll = new JScrollPane(inputField);
@@ -266,7 +325,7 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
         hintLabel.setFont(new Font("Segoe UI", Font.PLAIN, 11));
         hintLabel.setForeground(TEXT_MUTED);
 
-        // Center: Working indicator and Plan Mode toggle
+        // Center: Working indicator only
         JPanel centerPanel = new JPanel(new FlowLayout(FlowLayout.CENTER, 8, 0));
         centerPanel.setOpaque(false);
 
@@ -274,22 +333,7 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
         workingLabel.setFont(new Font("Segoe UI", Font.PLAIN, 11));
         workingLabel.setForeground(new Color(100, 160, 200));  // Light blue for working state
 
-        // Plan Mode checkbox
-        planModeCheckBox = new JCheckBox("Plan Mode");
-        planModeCheckBox.setFont(new Font("Segoe UI", Font.PLAIN, 11));
-        planModeCheckBox.setForeground(new Color(120, 140, 170));  // Muted blue-gray
-        planModeCheckBox.setSelected(false);
-        planModeCheckBox.setOpaque(false);
-        planModeCheckBox.setToolTipText("Enable Plan Mode - Claude will plan before implementing");
-        planModeCheckBox.addActionListener(e -> {
-            boolean selected = planModeCheckBox.isSelected();
-            if (cliWrapper != null) {
-                cliWrapper.setPlanMode(selected);
-            }
-        });
-
         centerPanel.add(workingLabel);
-        centerPanel.add(planModeCheckBox);
 
         // Right: Status and tokens
         JPanel rightStatusPanel = new JPanel(new FlowLayout(FlowLayout.RIGHT, 8, 0));
@@ -310,7 +354,13 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
         statusBar.add(centerPanel, BorderLayout.CENTER);
         statusBar.add(rightStatusPanel, BorderLayout.EAST);
 
-        container.add(inputWrapper, BorderLayout.CENTER);
+        // Add components: top panel (checkboxes) at top, input in center, status at bottom
+        JPanel centerWrapper = new JPanel(new BorderLayout());
+        centerWrapper.setOpaque(false);
+        centerWrapper.add(topPanel, BorderLayout.NORTH);
+        centerWrapper.add(inputWrapper, BorderLayout.CENTER);
+
+        container.add(centerWrapper, BorderLayout.CENTER);
         container.add(statusBar, BorderLayout.SOUTH);
 
         return container;
@@ -318,9 +368,18 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
 
     public void startCLI() {
         if (cliWrapper == null) {
-            cliWrapper = new VisualCCCliWrapper(project, this);
+            // Pass the conversation history to the wrapper so context persists
+            cliWrapper = new VisualCCCliWrapper(project, this, conversationHistory);
             cliWrapper.start();
         }
+    }
+
+    /**
+     * Get the conversation history
+     * Used by CLI wrapper to maintain context across sessions
+     */
+    public com.google.gson.JsonArray getConversationHistory() {
+        return conversationHistory;
     }
 
     public void sendMessage() {
@@ -365,13 +424,59 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
             scrollPane.repaint();
             System.out.println("[VisualCC] Message component added, panel size: " + messagesPanel.getComponentCount());
 
-            // Auto-scroll to bottom after a short delay to ensure layout is complete
+            // Auto-scroll to bottom after layout is complete
             SwingUtilities.invokeLater(() -> {
-                SwingUtilities.invokeLater(() -> {
-                    JScrollBar verticalBar = scrollPane.getVerticalScrollBar();
-                    verticalBar.setValue(verticalBar.getMaximum());
-                });
+                JScrollBar verticalBar = scrollPane.getVerticalScrollBar();
+                verticalBar.setValue(verticalBar.getMaximum());
             });
+        });
+    }
+
+    /**
+     * Add an approval component with Approve/Deny buttons to the chat.
+     */
+    public void addApprovalComponent(VisualCCApprovalComponent component) {
+        System.out.println("[VisualCC] addApprovalComponent called");
+        SwingUtilities.invokeLater(() -> {
+            messagesPanel.add(component);
+            messagesPanel.add(Box.createVerticalStrut(4));
+            messagesPanel.revalidate();
+            messagesPanel.repaint();
+            scrollPane.revalidate();
+            scrollPane.repaint();
+            System.out.println("[VisualCC] Approval component added, panel size: " + messagesPanel.getComponentCount());
+        });
+    }
+
+    /**
+     * Add a question component with clickable option buttons to the chat.
+     */
+    public void addQuestionComponent(VisualCCQuestionComponent component) {
+        System.out.println("[VisualCC] addQuestionComponent called");
+        SwingUtilities.invokeLater(() -> {
+            messagesPanel.add(component);
+            messagesPanel.add(Box.createVerticalStrut(4));
+            messagesPanel.revalidate();
+            messagesPanel.repaint();
+            scrollPane.revalidate();
+            scrollPane.repaint();
+            System.out.println("[VisualCC] Question component added, panel size: " + messagesPanel.getComponentCount());
+
+            // Auto-scroll to bottom
+            SwingUtilities.invokeLater(() -> {
+                JScrollBar verticalBar = scrollPane.getVerticalScrollBar();
+                verticalBar.setValue(verticalBar.getMaximum());
+            });
+        });
+    }
+
+    /**
+     * Scroll the chat panel to the bottom.
+     */
+    public void scrollToBottom() {
+        SwingUtilities.invokeLater(() -> {
+            JScrollBar verticalBar = scrollPane.getVerticalScrollBar();
+            verticalBar.setValue(verticalBar.getMaximum());
         });
     }
 
@@ -381,6 +486,10 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
             messagesPanel.revalidate();
             messagesPanel.repaint();
         });
+
+        // Clear conversation history when starting new chat
+        conversationHistory.clear();
+        System.out.println("[VisualCC] Conversation history cleared");
     }
 
     public void setPlaceholderText(String text) {
@@ -419,6 +528,10 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
                 }
                 statusLabel.setText("Working");
                 statusLabel.setForeground(new Color(100, 160, 200));
+
+                // Change button to STOP icon
+                sendButton.setIcon(AllIcons.Actions.Suspend);
+                sendButton.setToolTipText("Stop execution (click to abort)");
             } else {
                 if (workingTimer != null) {
                     workingTimer.stop();
@@ -428,6 +541,10 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
                 currentTool = null;
                 statusLabel.setText("Ready");
                 statusLabel.setForeground(TEXT_MUTED);
+
+                // Change button back to SEND icon
+                sendButton.setIcon(AllIcons.Actions.Execute);
+                sendButton.setToolTipText("Send message (Ctrl+Enter)");
             }
         });
     }
@@ -504,6 +621,23 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
         });
     }
 
+    /**
+     * Stop the current execution by disposing the CLI wrapper
+     */
+    private void stopExecution() {
+        System.out.println("[VisualCC] STOP button clicked - terminating execution");
+        addMessage("System", "⚠ Execution stopped by user", MessageType.SYSTEM);
+
+        if (cliWrapper != null) {
+            cliWrapper.dispose();
+            // Create a new wrapper for next execution
+            cliWrapper = null;
+        }
+
+        // Reset working state
+        setWorkingState(false);
+    }
+
     @Override
     public void dispose() {
         if (workingTimer != null) {
@@ -520,6 +654,7 @@ public class VisualCCChatPanel extends JPanel implements Disposable {
         CLAUDE,
         SYSTEM,
         TOOL,
-        QUESTION
+        QUESTION,
+        APPROVAL  // Permission/approval request with buttons
     }
 }

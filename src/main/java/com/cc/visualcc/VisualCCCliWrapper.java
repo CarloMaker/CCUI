@@ -1,5 +1,6 @@
 package com.cc.visualcc;
 
+import com.cc.visualcc.model.ApprovalRequest;
 import com.intellij.openapi.project.Project;
 import com.intellij.openapi.util.SystemInfo;
 import com.google.gson.Gson;
@@ -35,34 +36,51 @@ public class VisualCCCliWrapper {
     private Thread errorThread;
     private final AtomicBoolean running = new AtomicBoolean(false);
 
-    // Approval system states
-    private static final int STATE_RUNNING = 0;
-    private static final int STATE_WAITING_APPROVAL = 1;
-    private volatile int approvalState = STATE_RUNNING;
-    private final Object approvalLock = new Object();
-
     // Process I/O
     private OutputStream stdinStream;  // Keep open for approvals
-    private String pendingToolUseId = null;  // Tool waiting for approval
-    private JsonObject pendingToolInput = null;  // Tool input waiting for approval
+
+    // Approval manager
+    private VisualCCApprovalManager approvalManager;
+
+    // Approval preferences (session + persistent)
+    private ApprovalPreferences approvalPreferences;
 
     // Plan mode setting
     private boolean planMode = false;
 
-    // Conversation history to maintain context across CLI sessions
-    private JsonArray conversationHistory = new JsonArray();
+    // Auto-approval setting
+    private boolean autoApprovalEnabled = true;  // Default to auto-approve
 
     // User question response handling - following Kline approach
     private boolean waitingForAnswer = false;
     private StringBuilder accumulatedUserMessage = new StringBuilder();  // Accumulate questions + answers
 
+    // Conversation history to maintain context across CLI sessions
+    // Now passed in from chat panel to persist across STOP/restart
+    private JsonArray conversationHistory;
+
     // JSON parsing
     private final Gson gson = new Gson();
 
-    public VisualCCCliWrapper(Project project, VisualCCChatPanel chatPanel) {
+    /**
+     * Constructor for creating a new wrapper with existing conversation history
+     * This allows context to persist across STOP/restart scenarios
+     */
+    public VisualCCCliWrapper(Project project, VisualCCChatPanel chatPanel, com.google.gson.JsonArray existingHistory) {
         this.project = project;
         this.chatPanel = chatPanel;
+        this.approvalPreferences = new ApprovalPreferences(project);
+        this.approvalManager = new VisualCCApprovalManager(this, chatPanel, approvalPreferences);
+        this.conversationHistory = existingHistory != null ? existingHistory : new com.google.gson.JsonArray();
         initFileLogger();
+        log(">>> Wrapper created with history size: " + conversationHistory.size());
+    }
+
+    /**
+     * Legacy constructor for backward compatibility - creates empty history
+     */
+    public VisualCCCliWrapper(Project project, VisualCCChatPanel chatPanel) {
+        this(project, chatPanel, null);
     }
 
     /**
@@ -233,23 +251,32 @@ public class VisualCCCliWrapper {
                 cmd.add("--output-format");
                 cmd.add("stream-json");
 
-                // Permission mode: bypassPermissions (auto-approve all operations)
-                // Valid modes: acceptEdits, bypassPermissions, default, delegate, dontAsk, plan
+                // Permission mode: bypassPermissions (auto-approve) or default (ask for approval)
                 cmd.add("--permission-mode");
-                cmd.add("bypassPermissions");
+                cmd.add(autoApprovalEnabled ? "bypassPermissions" : "default");
+
+                log(">>> Auto-approval: " + (autoApprovalEnabled ? "ENABLED (bypassPermissions)" : "DISABLED (default)"));
 
                 // Allow multiple turns for interactive conversations
                 cmd.add("--max-turns");
                 cmd.add("10");
 
                 ProcessBuilder pb = new ProcessBuilder(cmd);
-                pb.directory(new File(project.getBasePath()));
+
+                // Set working directory - use project base path or current directory
+                String workingDir = project.getBasePath();
+                if (workingDir == null || workingDir.isEmpty()) {
+                    // Fallback to current directory if project has no base path
+                    workingDir = System.getProperty("user.dir");
+                    log(">>> WARNING: Project has no base path, using current directory: " + workingDir);
+                }
+                pb.directory(new File(workingDir));
 
                 // Set environment
                 pb.redirectErrorStream(false);
 
                 log(">>> Executing CLI: " + pb.command());
-                log(">>> Working directory: " + project.getBasePath());
+                log(">>> Working directory: " + workingDir);
 
                 cliProcess = pb.start();
                 log(">>> Process started, PID: " + cliProcess.pid());
@@ -348,10 +375,16 @@ public class VisualCCCliWrapper {
     private void processJsonLine(String line) {
         if (line.trim().isEmpty()) return;
 
-        // STOP processing if we're waiting for user answer
+        // STOP processing if we're waiting for user answer or approval
         // This prevents processing after we've killed the CLI process
         if (waitingForAnswer) {
             log(">>> NOT processing line - waiting for user to answer questions");
+            return;
+        }
+
+        // Also stop processing if waiting for approval decision
+        if (approvalManager.isWaitingForApproval()) {
+            log(">>> NOT processing line - waiting for user approval decision");
             return;
         }
 
@@ -429,6 +462,47 @@ public class VisualCCCliWrapper {
                                                 return;  // Exit processing, wait for user response
                                             }
 
+                                            // Handle approval requests for file operations
+                                            // Check if we're already waiting for user to answer questions
+                                            if (waitingForAnswer) {
+                                                log(">>> NOT processing approval - waiting for user to answer questions");
+                                            } else if (approvalManager.shouldRequestApproval(autoApprovalEnabled, toolName)) {
+                                                log("==========================================");
+                                                log("!!! APPROVAL REQUIRED for: " + toolName + " !!!");
+                                                log("==========================================");
+
+                                                // Extract tool_use_id and input
+                                                String toolUseId = contentObj.has("id") ?
+                                                    contentObj.get("id").getAsString() : "";
+                                                JsonObject input = contentObj.has("input") ?
+                                                    contentObj.getAsJsonObject("input") : new JsonObject();
+
+                                                log(">>> Processing approval request - ID: " + toolUseId);
+
+                                                // Parse and display approval request
+                                                ApprovalRequest request = approvalManager.parseApprovalRequest(
+                                                    toolName, toolUseId, input);
+                                                approvalManager.requestApproval(request);
+
+                                                // IMPORTANT: Kill the CLI process to wait for user's approval decision
+                                                log(">>> Killing CLI process - waiting for approval decision");
+                                                if (cliProcess != null && cliProcess.isAlive()) {
+                                                    cliProcess.destroyForcibly();
+                                                    log(">>> CLI process killed for approval");
+
+                                                    // Interrupt output threads
+                                                    if (outputThread != null && outputThread.isAlive()) {
+                                                        outputThread.interrupt();
+                                                    }
+                                                    if (errorThread != null && errorThread.isAlive()) {
+                                                        errorThread.interrupt();
+                                                    }
+                                                }
+
+                                                chatPanel.setWorkingState(false);
+                                                return;  // Exit processing, wait for user's approval decision
+                                            }
+
                                             // Update status to show current tool
                                             if (!toolName.isEmpty()) {
                                                 chatPanel.setCurrentTool(toolName);
@@ -465,6 +539,13 @@ public class VisualCCCliWrapper {
                     // Result/final message with cost and duration info
                     log(">>> Result: " + line);
 
+                    // Check for permission denials
+                    if (obj.has("permission_denials")) {
+                        handlePermissionDenials(obj.getAsJsonArray("permission_denials"));
+                        // Don't show "Done" when there are permission denials
+                        return;
+                    }
+
                     // Extract cost and duration info (from Kilo Code types)
                     double totalCost = obj.has("total_cost_usd") ? obj.get("total_cost_usd").getAsDouble() : 0.0;
                     long durationMs = obj.has("duration_ms") ? obj.get("duration_ms").getAsLong() : 0;
@@ -474,6 +555,10 @@ public class VisualCCCliWrapper {
 
                     log(">>> Cost: $" + String.format("%.4f", totalCost) +
                         ", Duration: " + durationMs + "ms, API: " + durationApiMs + "ms, Turns: " + numTurns);
+
+                    // IMPORTANT: Reset working state when process completes
+                    chatPanel.setWorkingState(false);
+                    log(">>> Working state reset to false (result received)");
 
                     // Show completion message with cost info
                     chatPanel.setStatus("Done ($" + String.format("%.4f", totalCost) + ")", new Color(80, 140, 90));
@@ -539,6 +624,29 @@ public class VisualCCCliWrapper {
     }
 
     /**
+     * Get current plan mode setting
+     */
+    public boolean isPlanMode() {
+        return planMode;
+    }
+
+    /**
+     * Set auto-approval on/off
+     * @param enabled true for bypassPermissions (auto-approve), false for default (ask for approval)
+     */
+    public void setAutoApproval(boolean enabled) {
+        log(">>> Auto-approval set to: " + enabled);
+        this.autoApprovalEnabled = enabled;
+    }
+
+    /**
+     * Get current auto-approval setting
+     */
+    public boolean isAutoApproval() {
+        return autoApprovalEnabled;
+    }
+
+    /**
      * Clear conversation history for new conversation
      */
     public void clearHistory() {
@@ -548,13 +656,6 @@ public class VisualCCCliWrapper {
         conversationHistory = new JsonArray();
         log(">>> History cleared. New size: " + conversationHistory.size());
         log("==========================================");
-    }
-
-    /**
-     * Get current plan mode setting
-     */
-    public boolean isPlanMode() {
-        return planMode;
     }
 
     /**
@@ -609,8 +710,9 @@ public class VisualCCCliWrapper {
                     log("WARNING: No 'questions' field in input!");
                 }
 
+                // Build questions text and extract options
                 StringBuilder questionsText = new StringBuilder();
-                questionsText.append("[Claude ha delle domande]\n\n");
+                java.util.List<String> allOptions = new java.util.ArrayList<>();
 
                 if (questions != null && questions.size() > 0) {
                     for (int i = 0; i < questions.size(); i++) {
@@ -626,10 +728,25 @@ public class VisualCCCliWrapper {
                             questionsText.append("\n");
                             log(">>> Question " + (i+1) + ": " + questionText);
 
-                            // Also log options if available
+                            // Extract options if available
                             if (questionObj.has("options")) {
                                 JsonArray options = questionObj.get("options").getAsJsonArray();
                                 log(">>>    Options available: " + options.size());
+                                for (JsonElement optionEl : options) {
+                                    // Options are objects with "label" and "description"
+                                    if (optionEl.isJsonObject()) {
+                                        JsonObject optionObj = optionEl.getAsJsonObject();
+                                        String label = optionObj.has("label") ?
+                                            optionObj.get("label").getAsString() : optionObj.toString();
+                                        allOptions.add(label);
+                                        log(">>>      Option: " + label);
+                                    } else {
+                                        // Fallback for string options
+                                        String option = optionEl.getAsString();
+                                        allOptions.add(option);
+                                        log(">>>      Option: " + option);
+                                    }
+                                }
                             }
                         } else {
                             // Fallback if it's just a string
@@ -649,15 +766,39 @@ public class VisualCCCliWrapper {
                     }
                 }
 
-                // Display the questions
+                // Display the questions with or without clickable options
                 String qText = questionsText.toString();
-                log(">>> Displaying questions to user: " + qText);
-                chatPanel.addMessage("Claude", qText, VisualCCChatPanel.MessageType.QUESTION);
+                log(">>> Questions text: " + qText);
+                log(">>> Total options extracted: " + allOptions.size());
 
-                // Store the current context and start waiting for answer
-                // We'll accumulate the user's response when it comes
-                log(">>> Calling startWaitingForAnswer()");
-                startWaitingForAnswer("[User answered Claude's questions]");
+                if (!allOptions.isEmpty()) {
+                    // Use new clickable component with options
+                    log(">>> Creating question component with clickable options");
+                    VisualCCQuestionComponent questionComponent = new VisualCCQuestionComponent(
+                        qText, allOptions, selectedOption -> {
+                            // When user clicks an option, automatically send it as their answer
+                            log("==========================================");
+                            log(">>> User clicked option: " + selectedOption);
+                            log("==========================================");
+
+                            // Add the user's answer to conversation history
+                            JsonObject answerMsg = new JsonObject();
+                            answerMsg.addProperty("role", "user");
+                            answerMsg.addProperty("content", selectedOption);
+                            conversationHistory.add(answerMsg);
+                            log(">>> Added user's answer to history: " + selectedOption);
+
+                            // Restart CLI with the user's answer
+                            log(">>> Restarting CLI with user's answer");
+                            sendInputInternal("");
+                        });
+                    chatPanel.addQuestionComponent(questionComponent);
+                } else {
+                    // Fallback to simple message display for questions without options
+                    log(">>> No options found, using simple message display");
+                    chatPanel.addMessage("Claude", qText, VisualCCChatPanel.MessageType.QUESTION);
+                    startWaitingForAnswer("[User answered Claude's questions]");
+                }
 
                 // Set working state to false since we're waiting
                 chatPanel.setWorkingState(false);
@@ -689,10 +830,166 @@ public class VisualCCCliWrapper {
         } catch (Exception e) {
             log("ERROR in handleAskUserQuestion: " + e.getMessage());
             e.printStackTrace();
+
+            // Even if there's an error, we need to kill the process to prevent it from continuing
+            log(">>> Killing CLI process due to error in AskUserQuestion handling");
+            if (cliProcess != null && cliProcess.isAlive()) {
+                cliProcess.destroyForcibly();
+                log(">>> CLI process killed (error recovery)");
+
+                if (outputThread != null && outputThread.isAlive()) {
+                    outputThread.interrupt();
+                }
+                if (errorThread != null && errorThread.isAlive()) {
+                    errorThread.interrupt();
+                }
+            }
         }
 
         log("==========================================");
         log("!!! handleAskUserQuestion() END !!!");
+        log("==========================================");
+    }
+
+    /**
+     * Handle permission denials from CLI result.
+     * This happens when --permission-mode is default and the CLI denies a tool use.
+     * We need to show our approval UI and let the user decide.
+     */
+    private void handlePermissionDenials(com.google.gson.JsonArray denials) {
+        log("==========================================");
+        log("!!! handlePermissionDenials() START !!!");
+        log(">>> Permission denials count: " + denials.size());
+        log("==========================================");
+
+        try {
+            for (com.google.gson.JsonElement denialEl : denials) {
+                com.google.gson.JsonObject denial = denialEl.getAsJsonObject();
+
+                String toolName = denial.has("tool_name") ? denial.get("tool_name").getAsString() : "Unknown";
+                String toolUseId = denial.has("tool_use_id") ? denial.get("tool_use_id").getAsString() : "";
+                com.google.gson.JsonObject toolInput = denial.has("tool_input") ? denial.getAsJsonObject("tool_input") : new com.google.gson.JsonObject();
+
+                log(">>> Permission denied for tool: " + toolName + ", ID: " + toolUseId);
+
+                // Check if this tool is already approved (session or persistent)
+                if (approvalPreferences.isToolApproved(toolName)) {
+                    log(">>> Tool already approved, skipping UI: " + toolName);
+                    // We still need to let the user know to continue
+                    continue;
+                }
+
+                // Check if we should request approval
+                if (!approvalManager.shouldRequestApproval(autoApprovalEnabled, toolName)) {
+                    log(">>> Auto-approval enabled or tool doesn't require approval, skipping: " + toolName);
+                    continue;
+                }
+
+                // Parse the approval request
+                ApprovalRequest request = approvalManager.parseApprovalRequest(toolName, toolUseId, toolInput);
+                log(">>> Parsed approval request: " + request);
+
+                // Request approval through the manager
+                approvalManager.requestApproval(request);
+
+                // Only show the first approval request for now
+                // TODO: Handle multiple permission denials
+                break;
+            }
+
+        } catch (Exception e) {
+            log("ERROR in handlePermissionDenials: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        log("==========================================");
+        log("!!! handlePermissionDenials() END !!!");
+        log("==========================================");
+    }
+
+    /**
+     * Called when user makes an approval decision (Approve or Deny).
+     * This is called from VisualCCApprovalManager.
+     */
+    public void onApprovalDecision(ApprovalRequest request, boolean approved) {
+        log("==========================================");
+        log("!!! onApprovalDecision() START !!!");
+        log(">>> Request: " + request);
+        log(">>> Approved: " + approved);
+        log("==========================================");
+
+        try {
+            approvalManager.clearPending();
+
+            if (approved) {
+                // User approved - we need to continue execution
+                log(">>> User APPROVED - continuing execution");
+
+                // Check if process is still running
+                if (cliProcess != null && cliProcess.isAlive()) {
+                    // Process is still running (e.g., we interrupted it for approval)
+                    // Add approval confirmation to conversation and restart
+                    log(">>> Process is still running, restarting with approval");
+
+                    StringBuilder approvalContent = new StringBuilder();
+                    approvalContent.append("Please proceed with the approved operation:\n");
+                    approvalContent.append("- Tool: ").append(request.getToolName());
+                    if (request.getFilePath() != null) {
+                        approvalContent.append("\n- File: ").append(request.getFilePath());
+                    }
+                    approvalContent.append("\n\nThe operation was approved. Please continue executing.");
+
+                    JsonObject approvalMsg = new JsonObject();
+                    approvalMsg.addProperty("role", "user");
+                    approvalMsg.addProperty("content", approvalContent.toString());
+                    conversationHistory.add(approvalMsg);
+                    log(">>> Added approval confirmation to history: " + approvalContent);
+
+                    // Restart CLI with updated history
+                    log(">>> Restarting CLI to continue with approved operation");
+                    sendInputInternal("");
+                } else {
+                    // Process has already finished (e.g., permission denial from result)
+                    // Tell user to press Enter to continue
+                    log(">>> Process has finished, asking user to continue");
+
+                    // Show message to user
+                    chatPanel.addMessage("System",
+                            "✓ Operazione approvata! **Premi Invio per continuare**\n\n" +
+                                    "(Il tool \"" + request.getToolName() + "\" è stato approvato. " +
+                                    "Al prossimo messaggio, Claude procederà con l'operazione.)",
+                            VisualCCChatPanel.MessageType.SYSTEM);
+
+                    chatPanel.setPlaceholderText("Premi Invio per continuare...");
+                    chatPanel.setStatus("Approved. Press Enter to continue...", new java.awt.Color(80, 140, 90));
+                }
+
+            } else {
+                // User denied - pause and ask for instructions
+                log(">>> User DENIED - pausing and asking for instructions");
+
+                // Set waiting for answer state
+                waitingForAnswer = true;
+                accumulatedUserMessage.setLength(0);
+                accumulatedUserMessage.append("[Operation denied: ");
+                accumulatedUserMessage.append(request.getToolName());
+                if (request.getFilePath() != null) {
+                    accumulatedUserMessage.append(" on ").append(request.getFilePath());
+                }
+                accumulatedUserMessage.append(". User will provide new instructions.]");
+                log(">>> Waiting for user instructions");
+
+                chatPanel.setPlaceholderText("Provide instructions on how to proceed...");
+                chatPanel.setStatus("Operation denied. Waiting for instructions...", new java.awt.Color(170, 80, 80));
+            }
+
+        } catch (Exception e) {
+            log("ERROR in onApprovalDecision: " + e.getMessage());
+            e.printStackTrace();
+        }
+
+        log("==========================================");
+        log("!!! onApprovalDecision() END !!!");
         log("==========================================");
     }
 }
